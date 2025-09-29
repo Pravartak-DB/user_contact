@@ -1,8 +1,8 @@
-# user_contact.control
-
-comment = 'User contact information management for PostgreSQL'
+# user_contact extension control file
+comment = 'User contact information management with mandatory contact details for user creation'
 default_version = '1.0'
 module_pathname = '$libdir/user_contact'
-relocatable = true
+relocatable = false
+schema = public
 requires = ''
-trusted = false
+superuser = true
