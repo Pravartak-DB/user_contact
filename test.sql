@@ -1,190 +1,193 @@
--- automated_test.sql - Quick validation script for user_contact extension
--- Run with: psql -d test_database -f automated_test.sql
+-- =============================================================================
+-- Setup (as superuser)
+-- =============================================================================
 
-\set ON_ERROR_STOP on
-\timing on
+-- Load the extension
+CREATE EXTENSION user_contact;
 
--- Test setup
-\echo '=== STARTING USER_CONTACT EXTENSION TESTS ==='
+-- =============================================================================
+-- Test 1: Normal user creation with contact info
+-- =============================================================================
 
--- Test 1: Verify extension exists
-\echo '--- Test 1: Extension Status ---'
+-- Set contact info
+SELECT set_user_contact_info('alice@example.com', '1234567890');
+
+-- Create user
+CREATE USER alice WITH PASSWORD 'password123';
+
+-- Verify contact was stored
+SELECT * FROM get_user_contact('alice') AS (email text, phone text, created_at timestamptz, updated_at timestamptz);
+
+-- =============================================================================
+-- Test 2: Superuser direct INSERT
+-- =============================================================================
+
+-- Superuser can directly insert contact info without CREATE USER hook
+SELECT insert_user_contact('bob', 'bob@example.com', '9876543210');
+
+-- Verify
+SELECT * FROM user_contact_info WHERE username = 'bob';
+
+-- =============================================================================
+-- Test 3: Dynamic username (current_user, not hardcoded 'postgres')
+-- =============================================================================
+
+-- Check who has execute permission on superuser functions
 SELECT 
-    CASE 
-        WHEN count(*) > 0 THEN 'PASS: Extension loaded'
-        ELSE 'FAIL: Extension not found'
-    END as result
-FROM pg_extension WHERE extname = 'user_contact';
-
--- Test 2: Verify table exists with RLS
-\echo '--- Test 2: Table and RLS Status ---'
-SELECT 
-    CASE 
-        WHEN EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'user_contact_info')
-        AND EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'user_contact_info' AND rowsecurity = true)
-        THEN 'PASS: Table exists with RLS enabled'
-        ELSE 'FAIL: Table missing or RLS disabled'
-    END as result;
-
--- Test 3: CREATE USER should be blocked
-\echo '--- Test 3: CREATE USER Blocking ---'
-DO $$
-DECLARE
-    blocked boolean := false;
-BEGIN
-    BEGIN
-        CREATE USER test_blocked_user WITH PASSWORD 'should_fail';
-    EXCEPTION
-        WHEN feature_not_supported THEN
-            blocked := true;
-    END;
-    
-    IF blocked THEN
-        RAISE NOTICE 'PASS: CREATE USER properly blocked';
-    ELSE
-        RAISE NOTICE 'FAIL: CREATE USER was not blocked';
-        -- Cleanup if it wasn't blocked
-        DROP USER IF EXISTS test_blocked_user;
-    END IF;
-END $$;
-
--- Test 4: User creation with contact should work
-\echo '--- Test 4: User Creation with Contact ---'
-DO $$
-DECLARE
-    result text;
-BEGIN
-    SELECT create_user_with_contact(
-        'auto_test_user',
-        'test_password_123',
-        'autotest@example.com',
-        '5551234567'
-    ) INTO result;
-    
-    IF result IS NOT NULL THEN
-        RAISE NOTICE 'PASS: User created with contact info';
-    ELSE
-        RAISE NOTICE 'FAIL: User creation returned NULL';
-    END IF;
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'FAIL: User creation failed: %', SQLERRM;
-END $$;
-
--- Test 5: Verify user and contact data
-\echo '--- Test 5: Data Verification ---'
-SELECT 
-    CASE 
-        WHEN EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'auto_test_user' AND rolcanlogin = true)
-        AND EXISTS (SELECT 1 FROM user_contact_info WHERE username = 'auto_test_user')
-        THEN 'PASS: User and contact data both exist'
-        ELSE 'FAIL: Missing user or contact data'
-    END as result;
-
--- Test 6: Contact info update
-\echo '--- Test 6: Contact Update ---'
-DO $$
-BEGIN
-    PERFORM update_user_contact('auto_test_user', 'updated@example.com', '5559876543');
-    
-    IF EXISTS (
-        SELECT 1 FROM user_contact_info 
-        WHERE username = 'auto_test_user' 
-        AND email = 'updated@example.com' 
-        AND phone = '5559876543'
-    ) THEN
-        RAISE NOTICE 'PASS: Contact info updated successfully';
-    ELSE
-        RAISE NOTICE 'FAIL: Contact info update failed';
-    END IF;
-END $$;
-
--- Test 7: Helper functions exist
-\echo '--- Test 7: Helper Functions ---'
-SELECT 
-    CASE 
-        WHEN COUNT(*) >= 10 THEN 'PASS: All major functions exist'
-        ELSE 'FAIL: Missing functions, found: ' || COUNT(*)::text
-    END as result
+    p.proname,
+    pg_catalog.pg_get_userbyid(a.grantee) as grantee,
+    a.privilege_type
 FROM pg_proc p
-JOIN pg_namespace n ON p.pronamespace = n.oid
-WHERE n.nspname = 'public'
-AND p.proname LIKE '%user_contact%' 
-   OR p.proname LIKE 'create_%user%'
-   OR p.proname LIKE 'update_my_%'
-   OR p.proname LIKE 'validate_%';
+JOIN information_schema.routine_privileges a 
+    ON p.proname = a.routine_name
+WHERE p.proname IN ('update_user_contact', 'insert_user_contact', 'list_all_user_contacts')
+ORDER BY p.proname, grantee;
 
--- Test 8: Validation functions
-\echo '--- Test 8: Validation Functions ---'
+-- =============================================================================
+-- Test 4: Row-Level Security - Non-superuser SELECT
+-- =============================================================================
+
+-- Create a test user with contact info
+SELECT set_user_contact_info('charlie@example.com', '5551234567');
+CREATE USER charlie WITH PASSWORD 'password123';
+
+-- Grant charlie permission to connect
+GRANT CONNECT ON DATABASE postgres TO charlie;
+
+-- Switch to charlie (in a new session or use SET ROLE)
+SET ROLE charlie;
+
+-- Charlie can see his own info
+SELECT * FROM my_contact_info;
+
+-- Charlie CAN'T see other users' info (should return no rows)
+SELECT * FROM user_contact_info WHERE username = 'alice';
+
+-- This will work (via function with permission check)
+SELECT * FROM get_user_contact('charlie') AS (email text, phone text, created_at timestamptz, updated_at timestamptz);
+
+-- This should fail with permission error
+SELECT * FROM get_user_contact('alice') AS (email text, phone text, created_at timestamptz, updated_at timestamptz);
+
+-- Switch back to superuser
+RESET ROLE;
+
+-- =============================================================================
+-- Test 5: Normal user updating their own contact info
+-- =============================================================================
+
+SET ROLE charlie;
+
+-- Charlie updates his own email
+SELECT update_my_contact_info('charlie.new@example.com', NULL);
+
+-- Charlie updates his own phone
+SELECT update_my_contact_info(NULL, '5559876543');
+
+-- Charlie updates both
+SELECT update_my_contact_info('charlie.updated@example.com', '5551111111');
+
+-- Verify the update
+SELECT * FROM my_contact_info;
+
+RESET ROLE;
+
+-- =============================================================================
+-- Test 6: UPSERT - Update creates record if not exists
+-- =============================================================================
+
+-- Try to update a user that doesn't exist in the table yet
+-- First create the role
+CREATE USER david WITH PASSWORD 'password123';
+
+-- Update (which will INSERT since david is not in user_contact_info)
+SELECT update_user_contact('david', 'david@example.com', '5552223333');
+
+-- Verify it was inserted
+SELECT * FROM user_contact_info WHERE username = 'david';
+
+-- Now actually update it
+SELECT update_user_contact('david', 'david.new@example.com', NULL);
+
+-- Verify the update (phone should remain the same)
+SELECT * FROM user_contact_info WHERE username = 'david';
+
+-- =============================================================================
+-- Test 7: Partial updates (either email or phone)
+-- =============================================================================
+
+-- Update only email for alice
+SELECT update_user_contact('alice', 'alice.updated@example.com', NULL);
+
+-- Verify
+SELECT username, email, phone FROM user_contact_info WHERE username = 'alice';
+
+-- Update only phone for alice
+SELECT update_user_contact('alice', NULL, '5554445555');
+
+-- Verify
+SELECT username, email, phone FROM user_contact_info WHERE username = 'alice';
+
+-- =============================================================================
+-- Test 8: List all contacts (superuser only)
+-- =============================================================================
+
+-- As superuser, list all contacts
+SELECT * FROM list_all_user_contacts();
+
+-- As normal user, this should fail
+SET ROLE charlie;
+SELECT * FROM list_all_user_contacts();  -- Should error: must be superuser
+
+RESET ROLE;
+
+-- =============================================================================
+-- Test 9: Error handling
+-- =============================================================================
+
+-- Try to create user without setting contact info first
+CREATE USER erroruser WITH PASSWORD 'password123';
+-- Should fail: Contact information must be set before creating user
+
+-- Try invalid email
+SELECT set_user_contact_info('notanemail', '1234567890');
+-- Should fail: Invalid email format
+
+-- Try short phone
+SELECT set_user_contact_info('test@example.com', '123');
+-- Should fail: Phone number too short
+
+-- Try to update without providing either field
+SELECT update_user_contact('alice', NULL, NULL);
+-- Should fail: At least one of email or phone must be provided
+
+-- =============================================================================
+-- Test 10: Verify RLS policies are working
+-- =============================================================================
+
+-- Check active policies
 SELECT 
-    CASE 
-        WHEN validate_email('test@example.com') = true 
-        AND validate_email('invalid.email') = false
-        AND validate_phone('1234567890') = true
-        AND validate_phone('123') = false
-        THEN 'PASS: Validation functions work correctly'
-        ELSE 'FAIL: Validation functions not working properly'
-    END as result;
+    schemaname, 
+    tablename, 
+    policyname, 
+    permissive, 
+    roles,
+    cmd,
+    qual,
+    with_check
+FROM pg_policies 
+WHERE tablename = 'user_contact_info';
 
--- Test 9: Permission enforcement
-\echo '--- Test 9: Permission Test (as test user) ---'
-\c - auto_test_user
-
-DO $$
-DECLARE
-    access_denied boolean := false;
-BEGIN
-    BEGIN
-        PERFORM create_user_with_contact('should_fail', 'pass', 'fail@test.com', '1234567890');
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            access_denied := true;
-    END;
-    
-    IF access_denied THEN
-        RAISE NOTICE 'PASS: Non-superuser properly denied user creation';
-    ELSE
-        RAISE NOTICE 'FAIL: Non-superuser was allowed to create users';
-    END IF;
-END $$;
-
--- Test user can see own contact info
-SELECT 
-    CASE 
-        WHEN EXISTS (SELECT 1 FROM my_contact_info)
-        THEN 'PASS: User can view own contact info'
-        ELSE 'FAIL: User cannot view own contact info'
-    END as result;
-
--- Reconnect as superuser for cleanup
-\c - postgres
-
--- Test 10: Administrative functions (superuser only)
-\echo '--- Test 10: Admin Functions ---'
-SELECT 
-    CASE 
-        WHEN count(*) > 0 THEN 'PASS: Can list user contacts'
-        ELSE 'FAIL: Cannot list user contacts'
-    END as result
-FROM list_all_user_contacts();
-
--- Check statistics function
-SELECT 
-    CASE 
-        WHEN total_users > 0 AND users_with_contact > 0 
-        THEN 'PASS: Statistics function works'
-        ELSE 'FAIL: Statistics function issues'
-    END as result
-FROM user_contact_stats();
-
+-- =============================================================================
 -- Cleanup
-\echo '--- Cleanup ---'
-DROP USER IF EXISTS auto_test_user;
-DELETE FROM user_contact_info WHERE username = 'auto_test_user';
+-- =============================================================================
 
--- Final status
-\echo '=== TESTS COMPLETED ==='
-\echo 'Review the PASS/FAIL messages above for detailed results.'
-\echo 'All tests should show PASS for a working extension.'
+-- Drop test users
+DROP USER IF EXISTS alice;
+DROP USER IF EXISTS bob;
+DROP USER IF EXISTS charlie;
+DROP USER IF EXISTS david;
+DROP USER IF EXISTS erroruser;
 
-\timing off
+-- Clear the contact info
+TRUNCATE user_contact_info;
