@@ -1,4 +1,4 @@
--- user_contact--1.0.sql - Enhanced Version
+-- user_contact--1.0.sql - Enhanced Version with Manager Fixes
 
 -- Create the contact info table
 CREATE TABLE IF NOT EXISTS user_contact_info (
@@ -15,24 +15,24 @@ CREATE TABLE IF NOT EXISTS user_contact_info (
 -- Enable Row-Level Security
 ALTER TABLE user_contact_info ENABLE ROW LEVEL SECURITY;
 
--- Policy 1: Allow users to see their own contact info
+-- Policy 1: Allow users to see their own contact info (case-insensitive)
 CREATE POLICY user_own_contact_select
   ON user_contact_info
   FOR SELECT
-  USING (username = current_user);
+  USING (lower(username) = lower(current_user));
 
--- Policy 2: Allow users to update their own contact info
+-- Policy 2: Allow users to update their own contact info (case-insensitive)
 CREATE POLICY user_own_contact_update
   ON user_contact_info
   FOR UPDATE
-  USING (username = current_user)
-  WITH CHECK (username = current_user);
+  USING (lower(username) = lower(current_user))
+  WITH CHECK (lower(username) = lower(current_user));
 
--- Policy 3: Allow users to insert their own contact info
+-- Policy 3: Allow users to insert their own contact info (case-insensitive)
 CREATE POLICY user_own_contact_insert
   ON user_contact_info
   FOR INSERT
-  WITH CHECK (username = current_user);
+  WITH CHECK (lower(username) = lower(current_user));
 
 -- Policy 4: Allow superusers full access (bypasses RLS by default)
 -- Note: Superusers bypass RLS automatically, but we create this for clarity
@@ -41,17 +41,14 @@ CREATE POLICY superuser_all_access
   FOR ALL
   USING (pg_has_role(current_user, 'pg_database_owner', 'MEMBER'));
 
--- Revoke direct table access from PUBLIC
+-- Revoke ALL direct table access from PUBLIC (users cannot INSERT/UPDATE/DELETE directly)
 REVOKE ALL ON TABLE user_contact_info FROM PUBLIC;
 
--- Grant SELECT to PUBLIC so RLS policies can work
+-- Grant SELECT to PUBLIC so RLS policies can work (read-only via RLS)
 GRANT SELECT ON TABLE user_contact_info TO PUBLIC;
 
--- Grant UPDATE to PUBLIC so users can update their own info via RLS
-GRANT UPDATE ON TABLE user_contact_info TO PUBLIC;
-
--- Grant INSERT to PUBLIC so users can insert their own info via RLS
-GRANT INSERT ON TABLE user_contact_info TO PUBLIC;
+-- NOTE: We do NOT grant INSERT or UPDATE to PUBLIC directly on the table
+-- Users must use the extension functions (update_my_contact_info) which are SECURITY DEFINER
 
 -- =============================================================================
 -- C-LANGUAGE FUNCTIONS
@@ -144,11 +141,11 @@ GRANT EXECUTE ON FUNCTION update_user_contact(text, text, text) TO current_user;
 GRANT EXECUTE ON FUNCTION insert_user_contact(text, text, text) TO current_user;
 GRANT EXECUTE ON FUNCTION list_all_user_contacts() TO current_user;
 
--- Create a view for users to see their own contact info easily
+-- Create a view for users to see their own contact info easily (case-insensitive)
 CREATE VIEW my_contact_info AS
 SELECT email, phone, created_at, updated_at
 FROM user_contact_info
-WHERE username = current_user;
+WHERE lower(username) = lower(current_user);
 
 COMMENT ON VIEW my_contact_info IS 'View showing current user''s own contact information';
 
